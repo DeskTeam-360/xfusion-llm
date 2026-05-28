@@ -1,0 +1,190 @@
+{
+	"info": {
+		"_postman_id": "df1234a5-6789-0123-bcde-4f56789abcde",
+		"name": "Xfusion Exam Evaluation API",
+		"description": "Postman Collection for testing the Xfusion Automated Exam Evaluation API. Designed to connect with WordPress data sources.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "System Health Check",
+			"request": {
+				"auth": {
+					"type": "noauth"
+				},
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{baseUrl}}/",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						""
+					]
+				},
+				"description": "Checks backend status, database directories, and validates if the OpenAI API Key is loaded correctly."
+			},
+			"response": []
+		},
+		{
+			"name": "Knowledge Base",
+			"item": [
+				{
+					"name": "Upsert Company Knowledge",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"wordpress_post_id\": 101,\n  \"category\": \"Customer Service\",\n  \"content\": \"SOP for Handling Customer Complaints: 1. Always listen to customer complaints calmly without interrupting. 2. Apologize for the inconvenience they experienced. 3. Provide solution options in accordance with the company's 30-day warranty policy. 4. If the customer is still unsatisfied, offer to escalate the issue to the Team Supervisor within 1 hour.\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/knowledge/upsert",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"knowledge",
+								"upsert"
+							]
+						},
+						"description": "Indexes or updates a WordPress document inside the ChromaDB vector database. Performs automatic deduplication."
+					},
+					"response": []
+				},
+				{
+					"name": "Delete Company Knowledge",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/knowledge/delete/101",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"knowledge",
+								"delete",
+								"101"
+							]
+						},
+						"description": "Deletes all indexed vector chunks belonging to the specified WordPress post ID."
+					},
+					"response": []
+				},
+				{
+					"name": "List Company Knowledge",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/knowledge/list",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"knowledge",
+								"list"
+							]
+						},
+						"description": "Retrieves and lists all currently indexed knowledge base chunks and their metadata inside ChromaDB."
+					},
+					"response": []
+				}
+			],
+			"description": "Endpoints to manage company reference policies, SOPs, and guidelines."
+		},
+		{
+			"name": "Evaluation",
+			"item": [
+				{
+					"name": "Evaluate Exam Submission",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"user_id\": 42,\n  \"exam_id\": 5,\n  \"answers_data\": [\n    {\n      \"category\": \"Customer Service\",\n      \"question_answers\": [\n        {\n          \"question\": \"How do you handle an angry customer?\",\n          \"answer\": \"I listen to their complaint calmly and apologize. Afterward, I solve it myself immediately without involving the supervisor.\"\n        }\n      ]\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/evaluation/evaluate",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"evaluation",
+								"evaluate"
+							]
+						},
+						"description": "Submits employee exam answers. Retrieves contextual guidance from ChromaDB, compiles prompts, and runs gpt-4o-mini to produce a structured scorecard report in English."
+					},
+					"response": []
+				}
+			],
+			"description": "Endpoints to submit employee tests for instant grading."
+		}
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{apiKey}}",
+				"type": "string"
+			}
+		]
+	},
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://localhost:8000",
+			"type": "string"
+		},
+		{
+			"key": "apiKey",
+			"value": "super_secret_wordpress_token",
+			"type": "string"
+		}
+	]
+}

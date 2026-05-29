@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -106,11 +107,13 @@ async def upsert_knowledge(payload: KnowledgeUpsertRequest):
         )
         texts = text_splitter.split_text(payload.content)
         
-        # 4. Prepare metadata
+        # 4. Prepare metadata with current UTC timestamp
+        current_time = datetime.now(timezone.utc).isoformat()
         metadatas = [
             {
                 "wordpress_post_id": payload.wordpress_post_id,
-                "category": payload.category
+                "category": payload.category,
+                "updated_at": current_time
             }
             for _ in range(len(texts))
         ]

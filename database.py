@@ -57,6 +57,19 @@ def get_vector_store() -> Chroma:
     
     return _vector_store
 
+def get_chunks_by_wordpress_post_id(db: Chroma, post_id: int) -> list[str]:
+    """
+    Return all indexed document texts for a WordPress post ID.
+    """
+    try:
+        result = db.get(where={"wordpress_post_id": post_id})
+        if not result or "documents" not in result or not result["documents"]:
+            return []
+        return [doc for doc in result["documents"] if doc]
+    except Exception as e:
+        logger.error(f"Error fetching chunks for wordpress_post_id {post_id}: {str(e)}")
+        raise e
+
 def delete_by_wordpress_post_id(db: Chroma, post_id: int) -> int:
     """
     Query for documents in ChromaDB with metadata {"wordpress_post_id": post_id} and delete them.

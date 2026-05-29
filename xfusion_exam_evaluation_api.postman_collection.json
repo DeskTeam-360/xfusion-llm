@@ -123,7 +123,7 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"user_id\": 42,\n  \"exam_id\": 5,\n  \"answers_data\": [\n    {\n      \"category\": \"Customer Service\",\n      \"question_answers\": [\n        {\n          \"question\": \"How do you handle an angry customer?\",\n          \"answer\": \"I listen to their complaint calmly and apologize. Afterward, I solve it myself immediately without involving the supervisor.\"\n        }\n      ]\n    }\n  ]\n}"
+							"raw": "{\n  \"user_id\": 42,\n  \"created_at\": \"2026-05-29T10:30:00Z\",\n  \"company_information\": 101,\n  \"question_answers\": [\n    {\n      \"question\": \"How do you handle an angry customer?\",\n      \"answer\": \"I listen to their complaint calmly and apologize. Afterward, I solve it myself immediately without involving the supervisor.\"\n    }\n  ]\n}"
 						},
 						"url": {
 							"raw": "{{baseUrl}}/api/v1/evaluation/evaluate",
@@ -137,7 +137,7 @@
 								"evaluate"
 							]
 						},
-						"description": "Submits employee exam answers. Retrieves contextual guidance from ChromaDB, compiles prompts, and runs gpt-4o-mini to produce a structured scorecard report in English."
+						"description": "Submits employee exam answers. Loads company knowledge by WordPress post ID (company_information), returns created_at/evaluated_at timestamps and a structured scorecard in English."
 					},
 					"response": []
 				}

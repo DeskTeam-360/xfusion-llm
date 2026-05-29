@@ -149,6 +149,13 @@ curl -X 'DELETE' \
 ### C. Evaluate Exam Answer (`POST /api/v1/evaluation/evaluate`)
 Triggered when an employee submits their exam answers from WordPress.
 
+| Field | Type | Description |
+|-------|------|-------------|
+| `user_id` | integer | ID karyawan / user WordPress |
+| `created_at` | ISO 8601 datetime (optional) | Waktu submit dari client; jika kosong, server mengisi saat request diterima |
+| `company_information` | integer | WordPress `post_id` knowledge yang sudah di-index (sama dengan `wordpress_post_id` di upsert) |
+| `question_answers` | array | Daftar `{ question, answer }` |
+
 **cURL Example**:
 ```bash
 curl -X 'POST' \
@@ -158,16 +165,12 @@ curl -X 'POST' \
   -H 'Content-Type: application/json' \
   -d '{
   "user_id": 42,
-  "exam_id": 5,
-  "answers_data": [
+  "created_at": "2026-05-29T10:30:00Z",
+  "company_information": 101,
+  "question_answers": [
     {
-      "category": "Customer Service",
-      "question_answers": [
-        {
-          "question": "How do you handle an angry customer?",
-          "answer": "I listen to their complaint calmly and apologize. Afterward, I solve it myself immediately without involving the supervisor."
-        }
-      ]
+      "question": "How do you handle an angry customer?",
+      "answer": "I listen to their complaint calmly and apologize. Afterward, I solve it myself immediately without involving the supervisor."
     }
   ]
 }'
@@ -177,18 +180,19 @@ curl -X 'POST' \
 ```json
 {
   "user_id": 42,
-  "exam_id": 5,
-  "evaluations": [
-    {
-      "category": "Customer Service",
-      "score": 75,
-      "strengths": "The employee understands the importance of listening calmly and apologizing for the inconvenience.",
-      "improvements": "The employee stated they would handle everything themselves without involving the supervisor, which contradicts SOP point 4 where they must offer an escalation to the Team Supervisor within 1 hour if the customer remains unsatisfied.",
-      "evaluator_notes": "Basic empathy is excellent. However, please review the escalation protocol to supervisor when a direct solution does not satisfy the customer."
-    }
-  ]
+  "created_at": "2026-05-29T10:30:00Z",
+  "evaluated_at": "2026-05-29T10:30:04.123456+00:00",
+  "company_information": 101,
+  "evaluation": {
+    "score": 75,
+    "strengths": "The employee understands the importance of listening calmly and apologizing for the inconvenience.",
+    "improvements": "The employee stated they would handle everything themselves without involving the supervisor, which contradicts SOP point 4 where they must offer an escalation to the Team Supervisor within 1 hour if the customer remains unsatisfied.",
+    "evaluator_notes": "Basic empathy is excellent. However, please review the escalation protocol to supervisor when a direct solution does not satisfy the customer."
+  }
 }
 ```
+
+`evaluated_at` adalah timestamp server saat evaluasi selesai — gunakan untuk mengetahui kapan terakhir API dipanggil.
 
 ---
 

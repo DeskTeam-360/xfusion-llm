@@ -324,22 +324,26 @@ class UnifiedEvaluationRequest(BaseModel):
 
 
 class CategoryPerformanceFeedback(BaseModel):
-    strength: str = Field(..., description="What the employee is doing well")
-    weakness: str = Field(..., description="What is holding the employee back")
+    strength: str = Field(..., description="Greatest Strength — 50-75 words")
+    opportunity: str = Field(..., description="Greatest Opportunity — 50-75 words")
 
 
 class UnifiedEvaluationResult(BaseModel):
     cor_organization_capabilities: str = Field(
         ...,
-        description="Narrative insight across alignment, accountability, communication, leadership, execution",
+        description="COR Insight — 75-100 words across alignment, accountability, communication, leadership, execution",
     )
     performance: Dict[str, CategoryPerformanceFeedback] = Field(
         ...,
-        description="Per-category strength and weakness feedback",
+        description="Per-category Greatest Strength and Greatest Opportunity",
     )
     key_observation: str = Field(
         ...,
-        description="Overall conclusion synthesizing COR capabilities and performance",
+        description="Overall Insight — 100-150 words synthesizing COR capabilities and performance",
+    )
+    recommended_focus_area: str = Field(
+        ...,
+        description="Recommended Focus Area — 25-50 words",
     )
 
 
@@ -356,14 +360,20 @@ _FEEDBACK_HEADING_PREFIXES = (
     "WHAT YOU'RE DOING WELL:",
     "WHAT YOU'RE DOING WELL —",
     "WHAT YOU'RE DOING WELL -",
+    "GREATEST STRENGTH:",
+    "GREATEST STRENGTH —",
+    "GREATEST STRENGTH -",
     "WHAT'S HOLDING YOU BACK:",
     "WHAT'S HOLDING YOU BACK —",
     "WHAT'S HOLDING YOU BACK -",
+    "GREATEST OPPORTUNITY:",
+    "GREATEST OPPORTUNITY —",
+    "GREATEST OPPORTUNITY -",
 )
 
 
 def _strip_feedback_heading(text: str) -> str:
-    """Remove legacy heading prefixes from strength/weakness body text."""
+    """Remove legacy heading prefixes from strength/opportunity body text."""
     trimmed = (text or "").strip()
     if not trimmed:
         return trimmed
@@ -445,7 +455,7 @@ async def evaluate_unified_cor(payload: UnifiedEvaluationRequest):
 
         category_keys = list(payload.performance.keys())
         category_json_hint = ", ".join(
-            f'"{key}": {{"strength": "...", "weakness": "..."}}' for key in category_keys
+            f'"{key}": {{"strength": "...", "opportunity": "..."}}' for key in category_keys
         )
 
         db = get_vector_store()
@@ -480,18 +490,26 @@ COR Organization Capabilities (scores 0-5, pre-calculated):
 Performance by FUSION dimension (Primary = highest-weight questions, Secondary, Tertiary):
 {performance}
 
+Output mapping (AI-PROMPT):
+- key_observation = Overall Insight (100-150 words)
+- performance[].strength = Greatest Strength per FUSION dimension (50-75 words)
+- performance[].opportunity = Greatest Opportunity per FUSION dimension (50-75 words)
+- cor_organization_capabilities = COR Insight (75-100 words)
+- recommended_focus_area = Recommended Focus Area (25-50 words)
+
 Coaching instructions:
 1. Apply the interpretation rules, reflection guidance, and tone requirements from the system prompt.
 2. Use participant reflection answers as the primary personalization source.
 3. Focus on relationships between scores and behavioral patterns — do not simply explain individual scores.
-4. Write cor_organization_capabilities as one cohesive narrative (75-100 words) about alignment, accountability, communication, leadership, and execution — referencing the numeric scores and COR Performance knowledge.
+4. Write cor_organization_capabilities (COR Insight) as one cohesive narrative (75-100 words) about alignment, accountability, communication, leadership, and execution — referencing the numeric scores and COR Performance knowledge.
 5. For each performance category, provide plain feedback only (no headings or labels inside the text):
-   - strength: 2-4 sentences (50-75 words) describing what the employee is doing well
-   - weakness: 2-4 sentences (50-75 words) describing the greatest opportunity / what is holding them back
-6. Write key_observation as an overall insight synthesis (100-150 words) connecting capabilities and performance patterns.
-7. Write in English. Be constructive and specific. Do NOT prefix strength or weakness values with titles like "WHAT YOU'RE DOING WELL".
-8. Use coaching tone: "Your responses suggest...", "You may benefit from...", "This pattern often appears when...", "Consider focusing on...".
-9. Avoid diagnostic or clinical language.
+   - strength: Greatest Strength — 50-75 words describing what the employee is doing well
+   - opportunity: Greatest Opportunity — 50-75 words describing the primary growth area
+6. Write key_observation (Overall Insight) as a synthesis (100-150 words) connecting capabilities and performance patterns.
+7. Write recommended_focus_area (25-50 words) as one actionable focus recommendation tied to the greatest opportunity pattern.
+8. Write in English. Be constructive and specific. Do NOT prefix strength or opportunity values with titles like "WHAT YOU'RE DOING WELL".
+9. Use coaching tone: "Your responses suggest...", "You may benefit from...", "This pattern often appears when...", "Consider focusing on...".
+10. Avoid diagnostic or clinical language.
 
 Return ONLY raw JSON with this schema:
 {{
@@ -499,7 +517,8 @@ Return ONLY raw JSON with this schema:
   "performance": {{
     {category_hint}
   }},
-  "key_observation": "<string>"
+  "key_observation": "<string>",
+  "recommended_focus_area": "<string>"
 }}
 """),
         ])
@@ -537,9 +556,11 @@ Return ONLY raw JSON with this schema:
                         strength=_strip_feedback_heading(
                             str(block.get("strength") or block.get("Strength") or "No feedback provided.")
                         ),
-                        weakness=_strip_feedback_heading(
+                        opportunity=_strip_feedback_heading(
                             str(
-                                block.get("weakness")
+                                block.get("opportunity")
+                                or block.get("Opportunity")
+                                or block.get("weakness")
                                 or block.get("Weak")
                                 or block.get("improvements")
                                 or "No feedback provided."
@@ -550,7 +571,7 @@ Return ONLY raw JSON with this schema:
                 for key in category_keys:
                     perf_out[key] = CategoryPerformanceFeedback(
                         strength="No feedback provided.",
-                        weakness="No feedback provided.",
+                        opportunity="No feedback provided.",
                     )
 
             evaluation_result = UnifiedEvaluationResult(
@@ -560,7 +581,16 @@ Return ONLY raw JSON with this schema:
                     or "No capability insight provided."
                 ),
                 performance=perf_out,
-                key_observation=str(eval_data.get("key_observation") or "No overall observation provided."),
+                key_observation=str(
+                    eval_data.get("key_observation")
+                    or eval_data.get("overall_insight")
+                    or "No overall insight provided."
+                ),
+                recommended_focus_area=str(
+                    eval_data.get("recommended_focus_area")
+                    or eval_data.get("recommended_focus")
+                    or "No recommended focus area provided."
+                ),
             )
         except json.JSONDecodeError:
             logger.error("Failed to decode unified LLM response as JSON: %s", response.content)
@@ -569,11 +599,12 @@ Return ONLY raw JSON with this schema:
                 performance={
                     key: CategoryPerformanceFeedback(
                         strength="Failed to process evaluation.",
-                        weakness="Invalid LLM output formatting.",
+                        opportunity="Invalid LLM output formatting.",
                     )
                     for key in category_keys
                 },
                 key_observation="An error occurred while parsing the AI evaluator response.",
+                recommended_focus_area="Unable to generate a focus recommendation.",
             )
         except Exception as llm_err:
             logger.error("Unified LLM error for user_id=%s: %s", payload.user_id, str(llm_err))
@@ -582,11 +613,12 @@ Return ONLY raw JSON with this schema:
                 performance={
                     key: CategoryPerformanceFeedback(
                         strength="Failed to evaluate.",
-                        weakness=f"Internal LLM Error: {str(llm_err)}",
+                        opportunity=f"Internal LLM Error: {str(llm_err)}",
                     )
                     for key in category_keys
                 },
                 key_observation="Please contact system administrator for technical details.",
+                recommended_focus_area="Unable to generate a focus recommendation.",
             )
 
         evaluated_at = datetime.now(timezone.utc)

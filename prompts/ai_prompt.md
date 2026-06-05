@@ -33,12 +33,12 @@ Communication = Collaboration and information flow.
 Leadership = Influence and development of others.
 Execution = Translating intentions into results.
 
-OUTPUT STRUCTURE
-1. Overall Insight (100-150 words)
-2. Greatest Strength (50-75 words)
-3. Greatest Opportunity (50-75 words)
-4. COR Insight (75-100 words)
-5. Recommended Focus Area (25-50 words)
+OUTPUT STRUCTURE (API field mapping)
+1. key_observation — Overall Insight (100-150 words)
+2. performance[].strength — Greatest Strength per FUSION dimension (50-75 words)
+3. performance[].opportunity — Greatest Opportunity per FUSION dimension (50-75 words)
+4. cor_organization_capabilities — COR Insight (75-100 words)
+5. recommended_focus_area — Recommended Focus Area (25-50 words)
 
 INTERPRETATION RULES
 Focus on relationships between scores.

@@ -1,7 +1,7 @@
 import json
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
@@ -277,4 +277,259 @@ Return the response ONLY in raw JSON format with the following schema:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"An error occurred during evaluation: {str(e)}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Unified COR evaluation — one request, one combined insight response
+# ---------------------------------------------------------------------------
+
+class CorCapabilities(BaseModel):
+    alignment: Optional[float] = Field(None, description="Alignment score 0-5")
+    accountability: Optional[float] = Field(None, description="Accountability score 0-5")
+    communication: Optional[float] = Field(None, description="Communication score 0-5")
+    leadership: Optional[float] = Field(None, description="Leadership score 0-5")
+    execution: Optional[float] = Field(None, description="Execution score 0-5")
+
+
+class TierQuestionAnswer(BaseModel):
+    question: str = Field(..., description="Question text")
+    answer: str = Field(..., description="Employee answer")
+
+
+class PerformanceTierBlock(BaseModel):
+    primary: List[TierQuestionAnswer] = Field(default_factory=list)
+    secondary: List[TierQuestionAnswer] = Field(default_factory=list)
+    tertiary: List[TierQuestionAnswer] = Field(default_factory=list)
+
+
+class UnifiedEvaluationRequest(BaseModel):
+    user_id: int = Field(..., description="WordPress user ID")
+    created_at: Optional[datetime] = Field(None, description="Client submission timestamp (ISO 8601)")
+    company_information: int = Field(0, description="Company knowledge post ID (0 if none)")
+    cor_organization_capabilities: CorCapabilities = Field(
+        ...,
+        description="Numeric COR organization capability scores",
+    )
+    performance: Dict[str, PerformanceTierBlock] = Field(
+        ...,
+        description="Performance categories keyed by slug (e.g. get_real, fill_buckets)",
+    )
+
+
+class CategoryPerformanceFeedback(BaseModel):
+    strength: str = Field(..., description="What the employee is doing well")
+    weakness: str = Field(..., description="What is holding the employee back")
+
+
+class UnifiedEvaluationResult(BaseModel):
+    cor_organization_capabilities: str = Field(
+        ...,
+        description="Narrative insight across alignment, accountability, communication, leadership, execution",
+    )
+    performance: Dict[str, CategoryPerformanceFeedback] = Field(
+        ...,
+        description="Per-category strength and weakness feedback",
+    )
+    key_observation: str = Field(
+        ...,
+        description="Overall conclusion synthesizing COR capabilities and performance",
+    )
+
+
+class UnifiedEvaluationResponse(BaseModel):
+    user_id: int
+    created_at: datetime
+    evaluated_at: datetime
+    company_information: int
+    evaluation: UnifiedEvaluationResult
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
+
+
+def _format_tier_block(label: str, block: PerformanceTierBlock) -> str:
+    parts = []
+    for tier_name in ("primary", "secondary", "tertiary"):
+        items = getattr(block, tier_name, []) or []
+        if not items:
+            continue
+        lines = []
+        for idx, qa in enumerate(items, 1):
+            lines.append(f"  {idx}. Q: {qa.question}\n     A: {qa.answer}")
+        parts.append(f"{label} — {tier_name.upper()}:\n" + "\n".join(lines))
+    return "\n\n".join(parts) if parts else f"{label}: (no answers provided)"
+
+
+@router.post("/evaluate-unified", response_model=UnifiedEvaluationResponse, status_code=status.HTTP_200_OK)
+async def evaluate_unified_cor(payload: UnifiedEvaluationRequest):
+    """
+    Unified COR insights: organization capabilities + all performance categories in one LLM call.
+    """
+    request_received_at = datetime.now(timezone.utc)
+    created_at = payload.created_at
+    if created_at is not None and created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    if created_at is None:
+        created_at = request_received_at
+
+    try:
+        if not settings.OPENAI_API_KEY or settings.OPENAI_API_KEY.strip() == "" or settings.OPENAI_API_KEY.startswith("sk-proj-..."):
+            raise ValueError("OPENAI_API_KEY is not configured or is using a placeholder.")
+
+        llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            openai_api_key=settings.OPENAI_API_KEY,
+            temperature=0.2,
+            model_kwargs={"response_format": {"type": "json_object"}},
+        )
+
+        caps = payload.cor_organization_capabilities.model_dump()
+        caps_lines = "\n".join(
+            f"- {key.replace('_', ' ').title()}: {value if value is not None else 'N/A'}"
+            for key, value in caps.items()
+        )
+
+        perf_sections = []
+        for slug, block in payload.performance.items():
+            title = slug.replace("_", " ").title()
+            perf_sections.append(_format_tier_block(title, block))
+        perf_data_str = "\n\n---\n\n".join(perf_sections) if perf_sections else "No performance data."
+
+        category_keys = list(payload.performance.keys())
+        category_json_hint = ", ".join(
+            f'"{key}": {{"strength": "...", "weakness": "..."}}' for key in category_keys
+        )
+
+        prompt_template = ChatPromptTemplate.from_messages([
+            ("system", "You are an expert COR™ (Core Organization Readiness) coach and leadership evaluator."),
+            ("user", """
+Evaluate this employee's COR profile using the numeric capability scores and qualitative performance answers below.
+
+COR Organization Capabilities (scores 0-5):
+{caps}
+
+Performance by category (Primary = highest-weight questions, Secondary, Tertiary):
+{performance}
+
+Instructions:
+1. Write cor_organization_capabilities as one cohesive narrative paragraph about alignment, accountability, communication, leadership, and execution — referencing the numeric scores.
+2. For each performance category, provide:
+   - strength: "WHAT YOU'RE DOING WELL" (2-4 sentences)
+   - weakness: "WHAT'S HOLDING YOU BACK" (2-4 sentences)
+3. Write key_observation as a final synthesis (3-5 sentences) connecting capabilities and performance patterns.
+4. Write in English. Be constructive and specific.
+
+Return ONLY raw JSON with this schema:
+{{
+  "cor_organization_capabilities": "<string>",
+  "performance": {{
+    {category_hint}
+  }},
+  "key_observation": "<string>"
+}}
+"""),
+        ])
+
+        evaluation_result: UnifiedEvaluationResult
+        token_usage = TokenUsage()
+
+        try:
+            chain = prompt_template | llm
+            with get_openai_callback() as cb:
+                response = await chain.ainvoke({
+                    "caps": caps_lines,
+                    "performance": perf_data_str,
+                    "category_hint": category_json_hint,
+                })
+            token_usage = _extract_token_usage(response)
+            if token_usage.total_tokens <= 0 and cb.total_tokens > 0:
+                token_usage = TokenUsage(
+                    prompt_tokens=int(cb.prompt_tokens or 0),
+                    completion_tokens=int(cb.completion_tokens or 0),
+                    total_tokens=int(cb.total_tokens or 0),
+                )
+
+            eval_data = json.loads(response.content)
+            perf_out: Dict[str, CategoryPerformanceFeedback] = {}
+            raw_perf = eval_data.get("performance") or {}
+            if isinstance(raw_perf, dict):
+                for key in category_keys:
+                    block = raw_perf.get(key) or {}
+                    if not isinstance(block, dict):
+                        block = {}
+                    perf_out[key] = CategoryPerformanceFeedback(
+                        strength=str(block.get("strength") or block.get("Strength") or "No feedback provided."),
+                        weakness=str(
+                            block.get("weakness")
+                            or block.get("Weak")
+                            or block.get("improvements")
+                            or "No feedback provided."
+                        ),
+                    )
+            else:
+                for key in category_keys:
+                    perf_out[key] = CategoryPerformanceFeedback(
+                        strength="No feedback provided.",
+                        weakness="No feedback provided.",
+                    )
+
+            evaluation_result = UnifiedEvaluationResult(
+                cor_organization_capabilities=str(
+                    eval_data.get("cor_organization_capabilities")
+                    or eval_data.get("cor_organization_capabilities_insight")
+                    or "No capability insight provided."
+                ),
+                performance=perf_out,
+                key_observation=str(eval_data.get("key_observation") or "No overall observation provided."),
+            )
+        except json.JSONDecodeError:
+            logger.error("Failed to decode unified LLM response as JSON: %s", response.content)
+            evaluation_result = UnifiedEvaluationResult(
+                cor_organization_capabilities="Failed to process unified evaluation.",
+                performance={
+                    key: CategoryPerformanceFeedback(
+                        strength="Failed to process evaluation.",
+                        weakness="Invalid LLM output formatting.",
+                    )
+                    for key in category_keys
+                },
+                key_observation="An error occurred while parsing the AI evaluator response.",
+            )
+        except Exception as llm_err:
+            logger.error("Unified LLM error for user_id=%s: %s", payload.user_id, str(llm_err))
+            evaluation_result = UnifiedEvaluationResult(
+                cor_organization_capabilities="Failed to evaluate.",
+                performance={
+                    key: CategoryPerformanceFeedback(
+                        strength="Failed to evaluate.",
+                        weakness=f"Internal LLM Error: {str(llm_err)}",
+                    )
+                    for key in category_keys
+                },
+                key_observation="Please contact system administrator for technical details.",
+            )
+
+        evaluated_at = datetime.now(timezone.utc)
+        logger.info(
+            "Unified evaluation completed for user_id=%s, tokens=%s",
+            payload.user_id,
+            token_usage.total_tokens,
+        )
+
+        return UnifiedEvaluationResponse(
+            user_id=payload.user_id,
+            created_at=created_at,
+            evaluated_at=evaluated_at,
+            company_information=payload.company_information,
+            evaluation=evaluation_result,
+            token_usage=token_usage,
+        )
+
+    except ValueError as val_err:
+        logger.error("Validation error in unified evaluation: %s", str(val_err))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(val_err))
+    except Exception as e:
+        logger.error("Unexpected error in unified evaluation: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred during unified evaluation: {str(e)}",
         )

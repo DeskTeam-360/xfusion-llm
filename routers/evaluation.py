@@ -1,6 +1,7 @@
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, status
@@ -10,7 +11,12 @@ from langchain_community.callbacks.manager import get_openai_callback
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-from database import get_vector_store, get_chunks_by_wordpress_post_id
+from database import (
+    COR_PERFORMANCE_CATEGORY,
+    get_chunks_by_category,
+    get_chunks_by_wordpress_post_id,
+    get_vector_store,
+)
 from config import settings
 
 # Configure logging
@@ -346,6 +352,49 @@ class UnifiedEvaluationResponse(BaseModel):
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
 
 
+_FEEDBACK_HEADING_PREFIXES = (
+    "WHAT YOU'RE DOING WELL:",
+    "WHAT YOU'RE DOING WELL —",
+    "WHAT YOU'RE DOING WELL -",
+    "WHAT'S HOLDING YOU BACK:",
+    "WHAT'S HOLDING YOU BACK —",
+    "WHAT'S HOLDING YOU BACK -",
+)
+
+
+def _strip_feedback_heading(text: str) -> str:
+    """Remove legacy heading prefixes from strength/weakness body text."""
+    trimmed = (text or "").strip()
+    if not trimmed:
+        return trimmed
+    upper = trimmed.upper()
+    for prefix in _FEEDBACK_HEADING_PREFIXES:
+        if upper.startswith(prefix.upper()):
+            return trimmed[len(prefix) :].strip()
+    return trimmed
+
+
+_AI_PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "ai_prompt.md"
+_AI_PROMPT_CACHE: Optional[str] = None
+
+
+def _load_cor_insight_coach_rules() -> str:
+    """Load FUSION coaching rules (AI-PROMPT.md) for unified insight generation."""
+    global _AI_PROMPT_CACHE
+    if _AI_PROMPT_CACHE is not None:
+        return _AI_PROMPT_CACHE
+    try:
+        _AI_PROMPT_CACHE = _AI_PROMPT_PATH.read_text(encoding="utf-8").strip()
+    except OSError as err:
+        logger.warning("Could not read coaching rules at %s: %s", _AI_PROMPT_PATH, err)
+        _AI_PROMPT_CACHE = (
+            "You are a Human Performance Coach operating within the FUSION framework. "
+            "Interpret assessment results; do not calculate scores. "
+            "Focus on behaviors, habits, performance, development, and growth."
+        )
+    return _AI_PROMPT_CACHE
+
+
 def _format_tier_block(label: str, block: PerformanceTierBlock) -> str:
     parts = []
     for tier_name in ("primary", "secondary", "tertiary"):
@@ -399,24 +448,50 @@ async def evaluate_unified_cor(payload: UnifiedEvaluationRequest):
             f'"{key}": {{"strength": "...", "weakness": "..."}}' for key in category_keys
         )
 
-        prompt_template = ChatPromptTemplate.from_messages([
-            ("system", "You are an expert COR™ (Core Organization Readiness) coach and leadership evaluator."),
-            ("user", """
-Evaluate this employee's COR profile using the numeric capability scores and qualitative performance answers below.
+        db = get_vector_store()
+        cor_perf_chunks = get_chunks_by_category(db, COR_PERFORMANCE_CATEGORY)
+        if cor_perf_chunks:
+            cor_perf_context = "\n---\n".join(cor_perf_chunks)
+            logger.info(
+                "Loaded %s COR Performance knowledge chunks for unified evaluation (user_id=%s)",
+                len(cor_perf_chunks),
+                payload.user_id,
+            )
+        else:
+            cor_perf_context = "NO COR PERFORMANCE KNOWLEDGE FOUND IN VECTOR STORE."
+            logger.info(
+                "No COR Performance knowledge chunks found for unified evaluation (user_id=%s)",
+                payload.user_id,
+            )
 
-COR Organization Capabilities (scores 0-5):
+        coach_rules = _load_cor_insight_coach_rules()
+
+        prompt_template = ChatPromptTemplate.from_messages([
+            ("system", "{coach_rules}"),
+            ("user", """
+You are generating unified COR™ insights. Scores are pre-calculated — do NOT recalculate or invent numeric scores.
+
+COR Performance Knowledge Base (category: COR Performance — use ALL of this context when interpreting results):
+{cor_perf_context}
+
+COR Organization Capabilities (scores 0-5, pre-calculated):
 {caps}
 
-Performance by category (Primary = highest-weight questions, Secondary, Tertiary):
+Performance by FUSION dimension (Primary = highest-weight questions, Secondary, Tertiary):
 {performance}
 
-Instructions:
-1. Write cor_organization_capabilities as one cohesive narrative paragraph about alignment, accountability, communication, leadership, and execution — referencing the numeric scores.
-2. For each performance category, provide:
-   - strength: "WHAT YOU'RE DOING WELL" (2-4 sentences)
-   - weakness: "WHAT'S HOLDING YOU BACK" (2-4 sentences)
-3. Write key_observation as a final synthesis (3-5 sentences) connecting capabilities and performance patterns.
-4. Write in English. Be constructive and specific.
+Coaching instructions:
+1. Apply the interpretation rules, reflection guidance, and tone requirements from the system prompt.
+2. Use participant reflection answers as the primary personalization source.
+3. Focus on relationships between scores and behavioral patterns — do not simply explain individual scores.
+4. Write cor_organization_capabilities as one cohesive narrative (75-100 words) about alignment, accountability, communication, leadership, and execution — referencing the numeric scores and COR Performance knowledge.
+5. For each performance category, provide plain feedback only (no headings or labels inside the text):
+   - strength: 2-4 sentences (50-75 words) describing what the employee is doing well
+   - weakness: 2-4 sentences (50-75 words) describing the greatest opportunity / what is holding them back
+6. Write key_observation as an overall insight synthesis (100-150 words) connecting capabilities and performance patterns.
+7. Write in English. Be constructive and specific. Do NOT prefix strength or weakness values with titles like "WHAT YOU'RE DOING WELL".
+8. Use coaching tone: "Your responses suggest...", "You may benefit from...", "This pattern often appears when...", "Consider focusing on...".
+9. Avoid diagnostic or clinical language.
 
 Return ONLY raw JSON with this schema:
 {{
@@ -436,6 +511,8 @@ Return ONLY raw JSON with this schema:
             chain = prompt_template | llm
             with get_openai_callback() as cb:
                 response = await chain.ainvoke({
+                    "coach_rules": coach_rules,
+                    "cor_perf_context": cor_perf_context,
                     "caps": caps_lines,
                     "performance": perf_data_str,
                     "category_hint": category_json_hint,
@@ -457,12 +534,16 @@ Return ONLY raw JSON with this schema:
                     if not isinstance(block, dict):
                         block = {}
                     perf_out[key] = CategoryPerformanceFeedback(
-                        strength=str(block.get("strength") or block.get("Strength") or "No feedback provided."),
-                        weakness=str(
-                            block.get("weakness")
-                            or block.get("Weak")
-                            or block.get("improvements")
-                            or "No feedback provided."
+                        strength=_strip_feedback_heading(
+                            str(block.get("strength") or block.get("Strength") or "No feedback provided.")
+                        ),
+                        weakness=_strip_feedback_heading(
+                            str(
+                                block.get("weakness")
+                                or block.get("Weak")
+                                or block.get("improvements")
+                                or "No feedback provided."
+                            )
                         ),
                     )
             else:

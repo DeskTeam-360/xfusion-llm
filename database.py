@@ -57,6 +57,25 @@ def get_vector_store() -> Chroma:
     
     return _vector_store
 
+COR_PERFORMANCE_CATEGORY = "COR Performance"
+
+
+def get_chunks_by_category(db: Chroma, category: str) -> list[str]:
+    """
+    Return all indexed document texts for a knowledge category (Chroma metadata `category`).
+    """
+    if not category or not str(category).strip():
+        return []
+    try:
+        result = db.get(where={"category": str(category).strip()})
+        if not result or "documents" not in result or not result["documents"]:
+            return []
+        return [doc for doc in result["documents"] if doc]
+    except Exception as e:
+        logger.error(f"Error fetching chunks for category {category!r}: {str(e)}")
+        raise e
+
+
 def get_chunks_by_wordpress_post_id(db: Chroma, post_id: int) -> list[str]:
     """
     Return all indexed document texts for a WordPress post ID.

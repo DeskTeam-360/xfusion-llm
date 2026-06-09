@@ -13,8 +13,8 @@ from langchain_openai import ChatOpenAI
 
 from database import (
     COR_PERFORMANCE_CATEGORY,
-    get_chunks_by_category,
     get_chunks_by_wordpress_post_id,
+    get_knowledge_sources_by_category,
     get_vector_store,
 )
 from config import settings
@@ -313,6 +313,14 @@ class UnifiedEvaluationRequest(BaseModel):
     user_id: int = Field(..., description="WordPress user ID")
     created_at: Optional[datetime] = Field(None, description="Client submission timestamp (ISO 8601)")
     company_information: int = Field(0, description="Company knowledge post ID (0 if none)")
+    model: Optional[str] = Field(None, description="OpenAI chat model override from WordPress settings")
+    coach_prompt: Optional[str] = Field(None, description="Coaching system prompt from WordPress (versioned)")
+    user_prompt_template: Optional[str] = Field(
+        None,
+        description="User instruction template from WordPress; placeholders: cor_perf_context, caps, performance, category_hint",
+    )
+    prompt_version_id: Optional[str] = Field(None, description="WordPress prompt version identifier")
+    prompt_version_label: Optional[str] = Field(None, description="Human-readable prompt version label")
     cor_organization_capabilities: CorCapabilities = Field(
         ...,
         description="Numeric COR organization capability scores",
@@ -321,6 +329,25 @@ class UnifiedEvaluationRequest(BaseModel):
         ...,
         description="Performance categories keyed by slug (e.g. get_real, fill_buckets)",
     )
+
+
+class KnowledgeSourceUsed(BaseModel):
+    wordpress_post_id: int = Field(0, description="WordPress xfusion_knowledge post ID")
+    category: str = Field(..., description="Knowledge category metadata")
+    chunk_count: int = Field(0, description="Number of Chroma chunks included")
+    updated_at: Optional[str] = Field(None, description="Last indexed timestamp from metadata")
+
+
+class GenerationContext(BaseModel):
+    model: str = Field(..., description="OpenAI model used for this generation")
+    prompt_version_id: Optional[str] = Field(None, description="Prompt version ID from WordPress")
+    prompt_version_label: Optional[str] = Field(None, description="Prompt version label from WordPress")
+    knowledge_category: str = Field(COR_PERFORMANCE_CATEGORY, description="Knowledge category loaded")
+    knowledge_sources: List[KnowledgeSourceUsed] = Field(
+        default_factory=list,
+        description="Indexed knowledge posts/chunks used as context",
+    )
+    knowledge_chunk_total: int = Field(0, description="Total Chroma chunks sent to the model")
 
 
 class CategoryPerformanceFeedback(BaseModel):
@@ -353,7 +380,55 @@ class UnifiedEvaluationResponse(BaseModel):
     evaluated_at: datetime
     company_information: int
     evaluation: UnifiedEvaluationResult
+    generation_context: GenerationContext
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
+
+
+_ALLOWED_INSIGHT_MODELS = frozenset({
+    "gpt-4o-mini",
+    "gpt-4o",
+    "gpt-4.1-mini",
+    "gpt-4.1",
+})
+
+
+def _resolve_insight_model(requested: Optional[str]) -> str:
+    candidate = (requested or settings.DEFAULT_INSIGHT_MODEL or "gpt-4o-mini").strip()
+    if candidate not in _ALLOWED_INSIGHT_MODELS:
+        logger.warning("Unsupported insight model %r — falling back to default.", candidate)
+        return settings.DEFAULT_INSIGHT_MODEL or "gpt-4o-mini"
+    return candidate
+
+
+def _resolve_coach_rules(payload: UnifiedEvaluationRequest) -> tuple[str, Optional[str], Optional[str]]:
+    custom = (payload.coach_prompt or "").strip()
+    if custom:
+        return custom, payload.prompt_version_id, payload.prompt_version_label
+    return _load_cor_insight_coach_rules(), payload.prompt_version_id, payload.prompt_version_label
+
+
+def _load_default_unified_user_prompt() -> str:
+    """Load default user instruction template (fallback when WordPress does not send one)."""
+    global _UNIFIED_USER_PROMPT_CACHE
+    if _UNIFIED_USER_PROMPT_CACHE is not None:
+        return _UNIFIED_USER_PROMPT_CACHE
+    try:
+        _UNIFIED_USER_PROMPT_CACHE = _UNIFIED_USER_PROMPT_PATH.read_text(encoding="utf-8").strip()
+    except OSError as err:
+        logger.warning("Could not read user prompt at %s: %s", _UNIFIED_USER_PROMPT_PATH, err)
+        _UNIFIED_USER_PROMPT_CACHE = (
+            "Generate unified COR insights from:\n{cor_perf_context}\n\nCaps:\n{caps}\n\nPerformance:\n{performance}\n\n"
+            "Return JSON with keys cor_organization_capabilities, performance ({category_hint}), "
+            "key_observation, recommended_focus_area."
+        )
+    return _UNIFIED_USER_PROMPT_CACHE
+
+
+def _resolve_user_prompt_template(payload: UnifiedEvaluationRequest) -> str:
+    custom = (payload.user_prompt_template or "").strip()
+    if custom:
+        return custom
+    return _load_default_unified_user_prompt()
 
 
 _FEEDBACK_HEADING_PREFIXES = (
@@ -385,7 +460,9 @@ def _strip_feedback_heading(text: str) -> str:
 
 
 _AI_PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "ai_prompt.md"
+_UNIFIED_USER_PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "unified_user_prompt.md"
 _AI_PROMPT_CACHE: Optional[str] = None
+_UNIFIED_USER_PROMPT_CACHE: Optional[str] = None
 
 
 def _load_cor_insight_coach_rules() -> str:
@@ -434,8 +511,12 @@ async def evaluate_unified_cor(payload: UnifiedEvaluationRequest):
         if not settings.OPENAI_API_KEY or settings.OPENAI_API_KEY.strip() == "" or settings.OPENAI_API_KEY.startswith("sk-proj-..."):
             raise ValueError("OPENAI_API_KEY is not configured or is using a placeholder.")
 
+        insight_model = _resolve_insight_model(payload.model)
+        coach_rules, prompt_version_id, prompt_version_label = _resolve_coach_rules(payload)
+        user_prompt_template = _resolve_user_prompt_template(payload)
+
         llm = ChatOpenAI(
-            model="gpt-4o-mini",
+            model=insight_model,
             openai_api_key=settings.OPENAI_API_KEY,
             temperature=0.2,
             model_kwargs={"response_format": {"type": "json_object"}},
@@ -459,13 +540,34 @@ async def evaluate_unified_cor(payload: UnifiedEvaluationRequest):
         )
 
         db = get_vector_store()
-        cor_perf_chunks = get_chunks_by_category(db, COR_PERFORMANCE_CATEGORY)
+        knowledge_sources_raw = get_knowledge_sources_by_category(db, COR_PERFORMANCE_CATEGORY)
+        cor_perf_chunks = [chunk for source in knowledge_sources_raw for chunk in source.get("chunks", [])]
+        knowledge_sources_used = [
+            KnowledgeSourceUsed(
+                wordpress_post_id=int(source.get("wordpress_post_id") or 0),
+                category=str(source.get("category") or COR_PERFORMANCE_CATEGORY),
+                chunk_count=int(source.get("chunk_count") or 0),
+                updated_at=source.get("updated_at"),
+            )
+            for source in knowledge_sources_raw
+        ]
+        generation_context = GenerationContext(
+            model=insight_model,
+            prompt_version_id=prompt_version_id,
+            prompt_version_label=prompt_version_label,
+            knowledge_category=COR_PERFORMANCE_CATEGORY,
+            knowledge_sources=knowledge_sources_used,
+            knowledge_chunk_total=len(cor_perf_chunks),
+        )
+
         if cor_perf_chunks:
             cor_perf_context = "\n---\n".join(cor_perf_chunks)
             logger.info(
-                "Loaded %s COR Performance knowledge chunks for unified evaluation (user_id=%s)",
+                "Loaded %s COR Performance knowledge chunks for unified evaluation (user_id=%s, model=%s, prompt=%s)",
                 len(cor_perf_chunks),
                 payload.user_id,
+                insight_model,
+                prompt_version_id or "file-default",
             )
         else:
             cor_perf_context = "NO COR PERFORMANCE KNOWLEDGE FOUND IN VECTOR STORE."
@@ -474,53 +576,9 @@ async def evaluate_unified_cor(payload: UnifiedEvaluationRequest):
                 payload.user_id,
             )
 
-        coach_rules = _load_cor_insight_coach_rules()
-
         prompt_template = ChatPromptTemplate.from_messages([
             ("system", "{coach_rules}"),
-            ("user", """
-You are generating unified COR™ insights. Scores are pre-calculated — do NOT recalculate or invent numeric scores.
-
-COR Performance Knowledge Base (category: COR Performance — use ALL of this context when interpreting results):
-{cor_perf_context}
-
-COR Organization Capabilities (scores 0-5, pre-calculated):
-{caps}
-
-Performance by FUSION dimension (Primary = highest-weight questions, Secondary, Tertiary):
-{performance}
-
-Output mapping (AI-PROMPT):
-- key_observation = Overall Insight (100-150 words)
-- performance[].strength = Greatest Strength per FUSION dimension (50-75 words)
-- performance[].opportunity = Greatest Opportunity per FUSION dimension (50-75 words)
-- cor_organization_capabilities = COR Insight (75-100 words)
-- recommended_focus_area = Recommended Focus Area (25-50 words)
-
-Coaching instructions:
-1. Apply the interpretation rules, reflection guidance, and tone requirements from the system prompt.
-2. Use participant reflection answers as the primary personalization source.
-3. Focus on relationships between scores and behavioral patterns — do not simply explain individual scores.
-4. Write cor_organization_capabilities (COR Insight) as one cohesive narrative (75-100 words) about alignment, accountability, communication, leadership, and execution — referencing the numeric scores and COR Performance knowledge.
-5. For each performance category, provide plain feedback only (no headings or labels inside the text):
-   - strength: Greatest Strength — 50-75 words describing what the employee is doing well
-   - opportunity: Greatest Opportunity — 50-75 words describing the primary growth area
-6. Write key_observation (Overall Insight) as a synthesis (100-150 words) connecting capabilities and performance patterns.
-7. Write recommended_focus_area (25-50 words) as one actionable focus recommendation tied to the greatest opportunity pattern.
-8. Write in English. Be constructive and specific. Do NOT prefix strength or opportunity values with titles like "WHAT YOU'RE DOING WELL".
-9. Use coaching tone: "Your responses suggest...", "You may benefit from...", "This pattern often appears when...", "Consider focusing on...".
-10. Avoid diagnostic or clinical language.
-
-Return ONLY raw JSON with this schema:
-{{
-  "cor_organization_capabilities": "<string>",
-  "performance": {{
-    {category_hint}
-  }},
-  "key_observation": "<string>",
-  "recommended_focus_area": "<string>"
-}}
-"""),
+            ("user", user_prompt_template),
         ])
 
         evaluation_result: UnifiedEvaluationResult
@@ -634,6 +692,7 @@ Return ONLY raw JSON with this schema:
             evaluated_at=evaluated_at,
             company_information=payload.company_information,
             evaluation=evaluation_result,
+            generation_context=generation_context,
             token_usage=token_usage,
         )
 

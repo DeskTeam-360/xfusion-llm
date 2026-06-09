@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     API_KEY: str = "super_secret_wordpress_token"
     OPENAI_API_KEY: str = ""
     CHROMA_PERSIST_DIR: str = "./chroma_db"
+    DEFAULT_INSIGHT_MODEL: str = "gpt-4o-mini"
 
     model_config = SettingsConfigDict(
         env_file=".env",

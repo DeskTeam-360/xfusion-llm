@@ -64,15 +64,48 @@ def get_chunks_by_category(db: Chroma, category: str) -> list[str]:
     """
     Return all indexed document texts for a knowledge category (Chroma metadata `category`).
     """
+    sources = get_knowledge_sources_by_category(db, category)
+    return [chunk for source in sources for chunk in source.get("chunks", [])]
+
+
+def get_knowledge_sources_by_category(db: Chroma, category: str) -> list[dict]:
+    """
+    Return knowledge grouped by WordPress post for a category (for audit / generation context).
+    """
     if not category or not str(category).strip():
         return []
     try:
         result = db.get(where={"category": str(category).strip()})
         if not result or "documents" not in result or not result["documents"]:
             return []
-        return [doc for doc in result["documents"] if doc]
+
+        documents = result["documents"]
+        metadatas = result.get("metadatas") or [{}] * len(documents)
+        grouped: dict[int, dict] = {}
+
+        for idx, doc in enumerate(documents):
+            if not doc:
+                continue
+            meta = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {}
+            post_id = int(meta.get("wordpress_post_id") or 0)
+            key = post_id if post_id > 0 else -(idx + 1)
+            if key not in grouped:
+                grouped[key] = {
+                    "wordpress_post_id": post_id,
+                    "category": str(meta.get("category") or category).strip(),
+                    "chunk_count": 0,
+                    "chunks": [],
+                    "updated_at": meta.get("updated_at"),
+                }
+            grouped[key]["chunk_count"] += 1
+            grouped[key]["chunks"].append(doc)
+            if meta.get("updated_at"):
+                grouped[key]["updated_at"] = meta.get("updated_at")
+
+        sources = sorted(grouped.values(), key=lambda item: int(item.get("wordpress_post_id") or 0))
+        return sources
     except Exception as e:
-        logger.error(f"Error fetching chunks for category {category!r}: {str(e)}")
+        logger.error(f"Error fetching knowledge sources for category {category!r}: {str(e)}")
         raise e
 
 

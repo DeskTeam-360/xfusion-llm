@@ -4,20 +4,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from config import settings
-from routers import knowledge, evaluation
+from routers import knowledge, evaluation, one_on_one
 
 # Configure logging
 logger = logging.getLogger("xfusion-backend.main")
 
 # Initialize FastAPI with customized metadata for the WordPress external API integration
 app = FastAPI(
-    title="Xfusion Exam Evaluation API",
+    title="Xfusion LLM API",
     description=(
-        "Production-Ready External API for automated employee exam evaluation. "
-        "Integrates with WordPress, using FastAPI, LangChain, OpenAI (gpt-4o-mini, text-embedding-3-small), "
-        "and ChromaDB."
+        "Production-Ready External API for FUSION AI services. "
+        "Knowledge sync, exam evaluation, COR unified insights, and 1-on-1 meeting brief/synthesis. "
+        "Integrates with Laravel and WordPress using FastAPI, LangChain, OpenAI, and ChromaDB."
     ),
-    version="1.0.0",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -46,6 +46,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Include Routers
 app.include_router(knowledge.router)
 app.include_router(evaluation.router)
+app.include_router(one_on_one.router)
 
 # Health Check & Landing Page
 @app.get("/", tags=["Health"])

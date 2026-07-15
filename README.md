@@ -23,7 +23,8 @@ An automated employee exam evaluation API designed to act as an external service
 └── routers/
     ├── __init__.py
     ├── knowledge.py      # CRUD Knowledge Base endpoints
-    └── evaluation.py     # Evaluation and LLM prompt logic
+    ├── evaluation.py     # Evaluation and COR unified insights
+    └── one_on_one.py     # 1-on-1 meeting brief & synthesis (Laravel)
 ```
 
 ---
@@ -193,6 +194,63 @@ curl -X 'POST' \
 ```
 
 `evaluated_at` adalah timestamp server saat evaluasi selesai — gunakan untuk mengetahui kapan terakhir API dipanggil.
+
+---
+
+### D. Unified COR Insights (`POST /api/v1/evaluation/evaluate-unified`)
+Digunakan WordPress plugin untuk Generate Insights (COR unified). Menerima gauge snapshots, capabilities, performance Q&A, coach prompt, dan user prompt template.
+
+---
+
+### E. 1-on-1 Meeting Brief (`POST /api/v1/one-on-one/meeting-brief`)
+Dipanggil **Laravel** (`OneOnOneAiService`) sebelum meeting 1-on-1. **Auth Bearer wajib.**
+
+**Request body (ringkas):**
+```json
+{
+  "conversation_id": 12,
+  "leader_user_id": 1,
+  "employee_user_id": 42,
+  "prior_syntheses": [],
+  "evidence_context": { "sections": {} }
+}
+```
+
+**Response:** `brief` (7 section cards), `model`, `tokens_used`, `cost_usd`
+
+---
+
+### F. 1-on-1 Meeting Synthesis (`POST /api/v1/one-on-one/meeting-synthesis`)
+Dipanggil Laravel setelah meeting selesai (`complete`). **Auth Bearer wajib.**
+
+**Request body (ringkas):**
+```json
+{
+  "conversation_id": 12,
+  "leader_user_id": 1,
+  "employee_user_id": 42,
+  "preparations": { "employee": "...", "leader": "..." },
+  "notes": [{ "section": "discussion", "note": "..." }],
+  "commitments": [{ "title": "...", "owner_role": "employee", "status": "open" }]
+}
+```
+
+**Response:** `synthesis` (8 section cards), `model`, `tokens_used`, `cost_usd`
+
+---
+
+## Laravel integration (xfusion-laravel)
+
+Set di `.env` Laravel:
+
+```ini
+XFUSION_LLM_API_URL=http://127.0.0.1:8000
+XFUSION_LLM_API_KEY=super_secret_wordpress_token
+```
+
+`XFUSION_LLM_API_KEY` harus sama dengan `API_KEY` di `.env` xfusion-llm.
+
+Knowledge category untuk 1-on-1 framework: `fusion_one_on_one` (upload via XFusion Knowledge admin → auto-sync ChromaDB).
 
 ---
 

@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from langchain_community.callbacks.manager import get_openai_callback
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
@@ -171,14 +171,12 @@ def _run_json_completion(system_prompt: str, user_prompt: str, model: str) -> tu
         )
 
     llm = ChatOpenAI(model=model, temperature=0.2, openai_api_key=settings.OPENAI_API_KEY)
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{user_input}"),
-    ])
-    chain = prompt | llm
 
     with get_openai_callback() as cb:
-        response = chain.invoke({"user_input": user_prompt})
+        response = llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ])
         prompt_tokens, completion_tokens, total_tokens = extract_token_counts(response, cb)
 
     content = getattr(response, "content", None)

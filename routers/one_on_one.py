@@ -116,6 +116,105 @@ def _section_block(raw: Any, *, max_items: int = 4) -> Dict[str, Any]:
     }
 
 
+def _format_commitment_status(status: str) -> str:
+    mapping = {
+        "in_progress": "In Progress",
+        "done": "Done",
+        "open": "Open",
+    }
+    return mapping.get(status, "Open")
+
+
+def _format_commitment_owner(role: str) -> str:
+    mapping = {
+        "employee": "Employee",
+        "leader": "Leader",
+        "shared": "Shared",
+    }
+    return mapping.get(role, "Shared")
+
+
+def _sanitize_commitment_rows(commitments: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    seen: set[str] = set()
+
+    for raw in commitments:
+        if not isinstance(raw, dict):
+            continue
+
+        title = str(raw.get("title") or "").strip()
+        if not title:
+            continue
+
+        role = str(raw.get("owner_role") or "shared").strip().lower()
+        if role not in {"employee", "leader", "shared"}:
+            role = "shared"
+
+        status = str(raw.get("status") or "open").strip().lower()
+        if status not in {"open", "in_progress", "done"}:
+            status = "open"
+
+        row_id = raw.get("id")
+        try:
+            row_id_int = int(row_id) if row_id is not None else 0
+        except (TypeError, ValueError):
+            row_id_int = 0
+
+        dedupe_key = f"id:{row_id_int}" if row_id_int > 0 else f"{title.lower()}|{role}|{status}"
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+
+        rows.append({
+            "title": title,
+            "owner_role": role,
+            "status": status,
+        })
+
+    return rows
+
+
+def _commitment_summary_from_rows(
+    commitments: List[Dict[str, Any]],
+    llm_block: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    rows = _sanitize_commitment_rows(commitments)
+    employee_count = sum(1 for row in rows if row["owner_role"] == "employee")
+    leader_count = sum(1 for row in rows if row["owner_role"] == "leader")
+    open_count = sum(1 for row in rows if row["status"] != "done")
+
+    llm_details = ""
+    if isinstance(llm_block, dict):
+        llm_details = str(llm_block.get("details") or "").strip()
+
+    if not rows:
+        details = llm_details or "No commitments were saved before synthesis generation."
+    else:
+        lines = ["Commitments on record:", ""]
+        for row in rows:
+            lines.append(f"• {row['title']}")
+            lines.append(
+                f"  Status: {_format_commitment_status(row['status'])}"
+                f" · Owner: {_format_commitment_owner(row['owner_role'])}"
+            )
+            lines.append("")
+        details = "\n".join(lines).rstrip()
+        if llm_details and not any(row["title"].lower() in llm_details.lower() for row in rows[:2]):
+            details = f"{details}\n\n{llm_details}"
+
+    return {
+        "employee_count": employee_count,
+        "leader_count": leader_count,
+        "open_count": open_count,
+        "items": [
+            f"Employee Commitments: {employee_count} active",
+            f"Leader Commitments: {leader_count} active",
+            f"Open Commitments: {open_count} total",
+        ],
+        "details": details,
+    }
+
+
 def _normalize_brief(data: Dict[str, Any]) -> Dict[str, Any]:
     return {key: _section_block(data.get(key)) for key in BRIEF_SECTION_KEYS}
 
@@ -277,6 +376,10 @@ async def meeting_synthesis(payload: MeetingSynthesisRequest) -> MeetingSynthesi
         system_prompt, user_prompt, model
     )
     synthesis = _normalize_synthesis(parsed)
+    synthesis["commitment_summary"] = _commitment_summary_from_rows(
+        payload.commitments,
+        synthesis.get("commitment_summary"),
+    )
     cost = estimate_cost_usd(used_model, prompt_tokens, completion_tokens)
 
     return MeetingSynthesisResponse(

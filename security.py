@@ -10,8 +10,9 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)
     Dependency to validate the Bearer token passed in the Authorization header.
     Validates it against the API_KEY set in the environment settings.
     """
-    token = credentials.credentials
-    if token != settings.API_KEY:
+    token = credentials.credentials.strip()
+    expected = settings.API_KEY.strip()
+    if token != expected:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API Key Bearer token."

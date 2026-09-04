@@ -28,6 +28,13 @@ PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 COR_CAPABILITIES = ("alignment", "accountability", "communication", "leadership", "execution")
 TREND_VALUES = {"up", "down", "flat"}
 CAPABILITY_LABELS = {"Strength", "Developing", "Opportunity", "No data"}
+CAPABILITY_TITLES = {
+    "alignment": "Alignment",
+    "accountability": "Accountability",
+    "communication": "Communication",
+    "leadership": "Leadership",
+    "execution": "Execution",
+}
 
 
 class AssessmentRequest(BaseModel):
@@ -262,6 +269,100 @@ def _commitment_summary_from_rows(commitments: List[Dict[str, Any]]) -> Dict[str
     }
 
 
+def _evidence_data_completeness(evidence: Dict[str, Any]) -> Dict[str, Any]:
+    """% of Step 1 evidence sources marked available — a plain count, never
+    an AI judgment call, so this is computed here rather than trusted from
+    the model output."""
+    sources = evidence.get("evidence_sources")
+    if not isinstance(sources, list) or not sources:
+        return {"percent": 0, "label": "No evidence sources available yet."}
+
+    total = len(sources)
+    available = sum(1 for s in sources if isinstance(s, dict) and s.get("available"))
+    percent = round(available / total * 100) if total else 0
+
+    if percent >= 80:
+        label = "High — most evidence sources are current."
+    elif percent >= 50:
+        label = "Medium — some evidence sources are still missing."
+    else:
+        label = "Low — most evidence sources are not yet available."
+
+    return {"percent": percent, "label": label}
+
+
+def _synthesis_confidence_level(
+    evidence: Dict[str, Any],
+    assessment: Dict[str, Any],
+    commitments: List[Dict[str, Any]],
+    leadership_considered: bool,
+    discussion_considered: bool,
+) -> Dict[str, Any]:
+    """How complete this quarter's inputs are, as a plain signal count —
+    computed here, not asked of the model, same reasoning as
+    _evidence_data_completeness."""
+    signals = [
+        bool(evidence) and evidence.get("overall_readiness_score") is not None,
+        bool(assessment),
+        bool(commitments),
+        leadership_considered,
+        discussion_considered,
+    ]
+    percent = round(sum(1 for s in signals if s) / len(signals) * 100)
+
+    if percent >= 80:
+        label = "High confidence — based on complete quarterly inputs."
+    elif percent >= 50:
+        label = "Medium confidence — some quarterly inputs are missing."
+    else:
+        label = "Low confidence — most quarterly inputs are missing."
+
+    return {"percent": percent, "label": label}
+
+
+def _recommended_areas_of_attention(
+    raw: Any,
+    assessment: Dict[str, Any],
+    opportunities: List[str],
+    risks: List[str],
+) -> List[Dict[str, Any]]:
+    """Which COR capabilities need attention is decided by the actual
+    Step 3 scores (lowest first), not by the model — the model only
+    supplies the descriptive text per capability, matched back here."""
+    by_capability: Dict[str, str] = {}
+    if isinstance(raw, list):
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            cap = str(row.get("capability") or "").strip().lower()
+            desc = str(row.get("description") or "").strip()
+            if cap in COR_CAPABILITIES and desc:
+                by_capability[cap] = desc
+
+    ranked: List[str] = []
+    caps = assessment.get("cor_capability_assessment")
+    if isinstance(caps, list):
+        scored = [c for c in caps if isinstance(c, dict) and c.get("score") is not None and c.get("capability") in COR_CAPABILITIES]
+        scored.sort(key=lambda c: c["score"])
+        ranked = [c["capability"] for c in scored]
+
+    out: List[Dict[str, Any]] = []
+    for cap in ranked[:3]:
+        desc = by_capability.get(cap) or (
+            f"{CAPABILITY_TITLES.get(cap, cap.title())} scored lowest of the five COR capabilities "
+            "this quarter and needs continued focus."
+        )
+        out.append({"capability": cap, "title": CAPABILITY_TITLES.get(cap, cap.title()), "description": desc})
+
+    if not out:
+        # No scored capabilities at all (e.g. no Step 3 assessment yet) —
+        # fall back to the top opportunity/risk text, no capability icon.
+        fallback_texts = [t for t in [opportunities[0] if opportunities else None, risks[0] if risks else None] if t]
+        out = [{"capability": None, "title": "Focus Area", "description": t} for t in fallback_texts[:3]]
+
+    return out
+
+
 def _normalize_synthesis(data: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
     evidence = context.get("evidence") if isinstance(context.get("evidence"), dict) else {}
     assessment = context.get("assessment") if isinstance(context.get("assessment"), dict) else {}
@@ -351,10 +452,6 @@ def _normalize_synthesis(data: Dict[str, Any], context: Dict[str, Any]) -> Dict[
         else max(0, int(llm_summary.get("not_started") or 0)),
     }
 
-    attention = _string_list(data.get("recommended_areas_of_attention"), 4)
-    if not attention:
-        attention = [s for s in [opportunities[0] if opportunities else None, risks[0] if risks else None] if s][:3]
-
     leadership_considered = bool(
         isinstance(data.get("leadership_context_considered"), bool)
         and data.get("leadership_context_considered")
@@ -365,6 +462,14 @@ def _normalize_synthesis(data: Dict[str, Any], context: Dict[str, Any]) -> Dict[
         and data.get("discussion_notes_considered")
     ) or (discussion_notes is not None and str(discussion_notes).strip() != "")
 
+    attention = _recommended_areas_of_attention(
+        data.get("recommended_areas_of_attention"), assessment, opportunities, risks
+    )
+    data_completeness = _evidence_data_completeness(evidence)
+    confidence_level = _synthesis_confidence_level(
+        evidence, assessment, commitments, leadership_considered, discussion_considered
+    )
+
     return {
         "executive_summary": executive_summary,
         "organizational_readiness_summary": {
@@ -372,6 +477,8 @@ def _normalize_synthesis(data: Dict[str, Any], context: Dict[str, Any]) -> Dict[
             "trend": trend,
             "narrative": narrative,
         },
+        "confidence_level": confidence_level,
+        "data_completeness": data_completeness,
         "organizational_strengths": strengths,
         "organizational_opportunities": opportunities,
         "key_risks": risks,
